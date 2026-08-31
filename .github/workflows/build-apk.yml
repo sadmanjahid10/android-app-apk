@@ -22,22 +22,25 @@ jobs:
 
       - name: Verify Java environment
         run: |
-          echo "=== Java Version ==="
-          java -version
-          echo "=== JAVA_HOME ==="
+          echo "=== Java Environment ==="
           echo "JAVA_HOME: $JAVA_HOME"
-          JAVA_MAJOR=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}' | cut -d'.' -f1)
-          echo "Active Java Major Version: $JAVA_MAJOR"
-          if [ "$JAVA_MAJOR" -lt 17 ]; then
-            echo "Error: Java 17 or higher is required. Found: $JAVA_MAJOR"
+          java -version
+          JAVA_MAJOR=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d. -f1)
+          if [ -z "$JAVA_MAJOR" ]; then
+            echo "ERROR: Unable to determine Java major version."
             exit 1
           fi
-          echo "Java verification passed: Temurin Java 17 is active."
+          if [ "$JAVA_MAJOR" -lt 17 ]; then
+            echo "ERROR: Java 17 or higher is required. Found Java $JAVA_MAJOR"
+            exit 1
+          fi
+          echo "Java $JAVA_MAJOR verified successfully."
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
+          cache-disabled: true
 
       - name: Prepare Debug Keystore
         run: |
@@ -58,15 +61,51 @@ jobs:
 
       - name: Verify APK
         run: |
-          if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
-            echo "Build successful. app/build/outputs/apk/debug/app-debug.apk verified."
-            ls -lh app/build/outputs/apk/debug/app-debug.apk
-          else
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$APK_PATH" ]; then
             echo "Primary debug APK not found in expected location. Searching app/build/outputs/apk..."
             find app/build/outputs/apk -name "*.apk"
-            echo "Error: app/build/outputs/apk/debug/app-debug.apk does not exist."
+            echo "Error: $APK_PATH does not exist."
             exit 1
           fi
+
+          APK_SIZE=$(stat -c%s "$APK_PATH" 2>/dev/null || stat -f%z "$APK_PATH" 2>/dev/null || wc -c < "$APK_PATH")
+          APK_SHA256=$(sha256sum "$APK_PATH" | cut -d' ' -f1)
+
+          APP_ID=""
+          if [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME/build-tools" ]; then
+            LATEST_BUILD_TOOLS=$(ls -1d $ANDROID_HOME/build-tools/* 2>/dev/null | sort -V | tail -n 1)
+            if [ -x "$LATEST_BUILD_TOOLS/aapt" ]; then
+              APP_ID=$("$LATEST_BUILD_TOOLS/aapt" dump badging "$APK_PATH" 2>/dev/null | awk -F"'" '/package: name=/ {print $2}')
+            elif [ -x "$LATEST_BUILD_TOOLS/aapt2" ]; then
+              APP_ID=$("$LATEST_BUILD_TOOLS/aapt2" dump badging "$APK_PATH" 2>/dev/null | awk -F"'" '/package: name=/ {print $2}')
+            fi
+          fi
+
+          if [ -z "$APP_ID" ] && command -v apkanalyzer >/dev/null 2>&1; then
+            APP_ID=$(apkanalyzer manifest application-id "$APK_PATH" 2>/dev/null || apkanalyzer -h manifest application-id "$APK_PATH" 2>/dev/null)
+          fi
+
+          if [ -z "$APP_ID" ] && [ -n "$ANDROID_HOME" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" ]; then
+            APP_ID=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" manifest application-id "$APK_PATH" 2>/dev/null)
+          fi
+
+          if [ -z "$APP_ID" ]; then
+            APP_ID="unknown.package"
+          fi
+
+          echo "================ APK VERIFICATION ================"
+          echo "Generated APK:"
+          echo "$APK_PATH"
+          echo ""
+          echo "Application ID:"
+          echo "$APP_ID"
+          echo ""
+          echo "SHA-256:"
+          echo "$APK_SHA256"
+          echo ""
+          echo "APK size: $APK_SIZE bytes"
+          echo "==================================================="
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
